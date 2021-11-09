@@ -17,13 +17,10 @@
 
 package org.apache.rocketmq.spring.autoconfigure;
 
-import java.util.Collections;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
 import org.apache.rocketmq.client.AccessChannel;
 import org.apache.rocketmq.spring.annotation.ConsumeMode;
 import org.apache.rocketmq.spring.annotation.MessageModel;
+import org.apache.rocketmq.spring.annotation.ReusableListener;
 import org.apache.rocketmq.spring.annotation.RocketMQMessageListener;
 import org.apache.rocketmq.spring.core.RocketMQListener;
 import org.apache.rocketmq.spring.core.RocketMQReplyListener;
@@ -35,14 +32,22 @@ import org.springframework.aop.framework.AopProxyUtils;
 import org.springframework.aop.scope.ScopedProxyUtils;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.SmartInitializingSingleton;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.support.BeanDefinitionValidationException;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Scope;
 import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.util.StringUtils;
+
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 @Configuration
 public class ListenerContainerConfiguration implements ApplicationContextAware, SmartInitializingSingleton {
@@ -75,8 +80,32 @@ public class ListenerContainerConfiguration implements ApplicationContextAware, 
         Map<String, Object> beans = this.applicationContext.getBeansWithAnnotation(RocketMQMessageListener.class)
             .entrySet().stream().filter(entry -> !ScopedProxyUtils.isScopedTarget(entry.getKey()))
             .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-
+        final Object o = null;
+        Map<String, Object> reusableTemp = beans.entrySet().stream().filter(entry -> {
+            Class<?> clazz = AopProxyUtils.ultimateTargetClass(entry.getValue());
+            if (clazz.getAnnotation(Scope.class) != null && clazz.getAnnotation(ReusableListener.class) != null) {
+                Scope scope = clazz.getAnnotation(Scope.class);
+                return "prototype".equals(scope.value());
+            }
+            return false;
+        })  .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+        reusableTemp.forEach((key, value) -> {
+            if (beans.get(key) != null) {
+                beans.remove(key);
+            }
+        });
+        HashMap<String, Object> reusable = new HashMap<>();
+        reusableTemp.forEach((key, value) -> {
+            Class<?> clazz = AopProxyUtils.ultimateTargetClass(value);
+            ReusableListener reusableListener = clazz.getAnnotation(ReusableListener.class);
+            int count = reusableListener.count();
+            for (int i = 0; i < count; i++) {
+                reusable.put(key + "_" + i, applicationContext.getBean(clazz));
+            }
+        });
+        //todo consume使用同一个注解但是需要产生多个不同的consume。需要想办法改变一个注解计算出不同的topic
         beans.forEach(this::registerContainer);
+        reusable.forEach(this::registerContainer);
     }
 
     private void registerContainer(String beanName, Object bean) {
@@ -91,7 +120,7 @@ public class ListenerContainerConfiguration implements ApplicationContextAware, 
         }
 
         RocketMQMessageListener annotation = clazz.getAnnotation(RocketMQMessageListener.class);
-
+        ReusableListener listener = clazz.getAnnotation(ReusableListener.class);
         String consumerGroup = this.environment.resolvePlaceholders(annotation.consumerGroup());
         String topic = this.environment.resolvePlaceholders(annotation.topic());
 
@@ -140,7 +169,15 @@ public class ListenerContainerConfiguration implements ApplicationContextAware, 
         if (!StringUtils.isEmpty(accessChannel)) {
             container.setAccessChannel(AccessChannel.valueOf(accessChannel));
         }
-        container.setTopic(environment.resolvePlaceholders(annotation.topic()));
+        Class<?> clazz = bean.getClass();
+        ReusableListener listener = clazz.getAnnotation(ReusableListener.class);
+        if(listener != null){
+            String topic = environment.resolvePlaceholders(annotation.topic());
+
+            container.setTopic();
+        }else {
+            container.setTopic(environment.resolvePlaceholders(annotation.topic()));
+        }
         String tags = environment.resolvePlaceholders(annotation.selectorExpression());
         if (!StringUtils.isEmpty(tags)) {
             container.setSelectorExpression(tags);
